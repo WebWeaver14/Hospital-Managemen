@@ -1,0 +1,469 @@
+/* ============================================================================
+   HOSPITAL MANAGEMENT SQL ANALYSIS
+   Dataset : Hospital Management Dataset (Kaggle - kanakbaghel)
+   Tables  : patients, doctors, appointments, treatments, billing
+   Author  : Sayan
+   Goal    : Identify where the hospital is losing revenue and operational
+             efficiency, and compare performance across doctors, specializations,
+             and branches.
+   ============================================================================ */
+
+create database HOSPITAL_db;
+
+use HOSPITAL_db;
+
+/* ============================================================
+   SECTION 1 — PATIENT DEMOGRAPHICS
+   ============================================================ */
+   
+-- 1.1 Gender split
+
+SELECT
+    gender,
+    COUNT(*) AS total_patients
+FROM patients
+GROUP BY gender;
+
+-- 1.2 Age-band distribution (CASE + DATE_DIFF)
+
+SELECT
+    CASE
+        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) < 18 THEN 'Under 18'
+        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) BETWEEN 18 AND 30 THEN '18-30'
+        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) BETWEEN 31 AND 45 THEN '31-45'
+        WHEN TIMESTAMPDIFF(YEAR, date_of_birth, CURDATE()) BETWEEN 46 AND 60 THEN '46-60'
+        ELSE 'Above 60'
+    END AS age_band,
+    COUNT(*) AS total_patients
+FROM patients
+GROUP BY age_band
+ORDER BY
+    CASE age_band
+        WHEN 'Under 18' THEN 1
+        WHEN '18-30' THEN 2
+        WHEN '31-45' THEN 3
+        WHEN '46-60' THEN 4
+        WHEN 'Above 60' THEN 5
+    END;
+
+-- 1.3 Insurance provider mix
+
+SELECT
+    insurance_provider,
+    COUNT(*) AS total_patients
+FROM patients
+GROUP BY insurance_provider
+ORDER BY total_patients DESC;
+
+/* ============================================================
+   SECTION 2 — APPOINTMENT EFFICIENCY
+   ============================================================ */
+   
+-- 2.1 Overall appointment status breakdown
+   
+SELECT
+    status,
+    COUNT(*) AS total_appointments
+FROM appointments
+GROUP BY status
+ORDER BY total_appointments DESC;
+   
+-- 2.2 No-show rate by doctor
+
+SELECT
+    d.doctor_id,
+    CONCAT(d.first_name, ' ', d.last_name) AS doctor_name,
+    COUNT(a.appointment_id) AS total_appointments,
+    SUM(CASE WHEN a.status = 'No Show' THEN 1 ELSE 0 END) AS no_show_count,
+    ROUND(
+        SUM(CASE WHEN a.status = 'No Show' THEN 1 ELSE 0 END) * 100.0 /
+        COUNT(a.appointment_id),
+        2
+    ) AS no_show_rate
+FROM doctors d
+JOIN appointments a
+    ON d.doctor_id = a.doctor_id
+GROUP BY d.doctor_id, doctor_name
+ORDER BY no_show_rate DESC;   
+   
+-- 2.3 Lost-appointment rate (no-show + cancelled) by specialization
+
+SELECT
+    d.specialization,
+    COUNT(a.appointment_id) AS total_appointments,
+    SUM(CASE
+            WHEN a.status IN ('No Show', 'Cancelled') THEN 1
+            ELSE 0
+        END) AS lost_appointments,
+    ROUND(
+        SUM(CASE
+                WHEN a.status IN ('No Show', 'Cancelled') THEN 1
+                ELSE 0
+            END) * 100.0 / COUNT(a.appointment_id),
+        2
+    ) AS lost_appointment_rate
+FROM doctors d
+JOIN appointments a
+    ON d.doctor_id = a.doctor_id
+GROUP BY d.specialization
+ORDER BY lost_appointment_rate DESC;   
+   
+-- 2.4 Appointment volume by day of week
+
+SELECT
+    DAYNAME(appointment_date) AS day_of_week,
+    COUNT(*) AS total_appointments
+FROM appointments
+GROUP BY DAYNAME(appointment_date)
+ORDER BY
+    FIELD(DAYNAME(appointment_date),
+          'Monday',
+          'Tuesday',
+          'Wednesday',
+          'Thursday',
+          'Friday',
+          'Saturday',
+          'Sunday');   
+   
+-- 2.5 Monthly appointment volume trend
+
+SELECT
+    DATE_FORMAT(appointment_date, '%Y-%m') AS month,
+    COUNT(*) AS total_appointments
+FROM appointments
+GROUP BY DATE_FORMAT(appointment_date, '%Y-%m')
+ORDER BY month;   
+   
+-- 2.6 Reason-for-visit distribution   
+
+SELECT
+    reason_for_visit,
+    COUNT(*) AS total_appointments
+FROM appointments
+GROUP BY reason_for_visit
+ORDER BY total_appointments DESC;
+
+/* ============================================================
+   SECTION 3 — REVENUE & BILLING HEALTH
+   ============================================================ */
+   
+-- 3.1 Revenue by payment status (the headline finding)
+
+SELECT
+    payment_status,
+    SUM(amount) AS total_revenue
+FROM billing
+GROUP BY payment_status
+ORDER BY total_revenue DESC;
+
+-- 3.2 Payment method vs payment status
+
+SELECT
+    payment_method,
+    payment_status,
+    COUNT(*) AS total_transactions,
+    SUM(amount) AS total_amount
+FROM billing
+GROUP BY payment_method, payment_status
+ORDER BY payment_method, payment_status;
+
+-- 3.3 Revenue collection rate by specialization (multi-table JOIN)
+
+SELECT
+    d.specialization,
+    SUM(b.amount) AS total_revenue,
+    SUM(CASE
+            WHEN b.payment_status = 'Paid' THEN b.amount
+            ELSE 0
+        END) AS collected_revenue,
+    ROUND(
+        SUM(CASE
+                WHEN b.payment_status = 'Paid' THEN b.amount
+                ELSE 0
+            END) * 100.0 / SUM(b.amount),
+        2
+    ) AS collection_rate
+FROM doctors d
+JOIN appointments a
+    ON d.doctor_id = a.doctor_id
+JOIN treatments t
+    ON a.appointment_id = t.appointment_id
+JOIN billing b
+    ON t.treatment_id = b.treatment_id
+GROUP BY d.specialization
+ORDER BY collection_rate DESC;
+
+-- 3.4 Revenue and at-risk amount by branch
+
+SELECT
+    d.hospital_branch,
+    SUM(b.amount) AS total_revenue,
+    SUM(CASE
+            WHEN b.payment_status IN ('Pending', 'Overdue')
+            THEN b.amount
+            ELSE 0
+        END) AS at_risk_amount,
+    SUM(CASE
+            WHEN b.payment_status = 'Paid'
+            THEN b.amount
+            ELSE 0
+        END) AS collected_revenue
+FROM doctors d
+JOIN appointments a
+    ON d.doctor_id = a.doctor_id
+JOIN treatments t
+    ON a.appointment_id = t.appointment_id
+JOIN billing b
+    ON t.treatment_id = b.treatment_id
+GROUP BY d.hospital_branch
+ORDER BY total_revenue DESC;
+
+-- 3.5 Average and total cost by treatment type
+
+SELECT
+    treatment_type,
+    COUNT(*) AS total_treatments,
+    ROUND(AVG(cost), 2) AS average_cost,
+    SUM(cost) AS total_cost
+FROM treatments
+GROUP BY treatment_type
+ORDER BY total_cost DESC;
+
+-- 3.6 Monthly collected revenue with running total (WINDOW FUNCTION + CTE)
+
+WITH monthly_revenue AS (
+    SELECT
+        DATE_FORMAT(bill_date, '%Y-%m') AS month,
+        SUM(amount) AS collected_revenue
+    FROM billing
+    WHERE payment_status = 'Paid'
+    GROUP BY DATE_FORMAT(bill_date, '%Y-%m')
+)
+SELECT
+    month,
+    collected_revenue,
+    SUM(collected_revenue) OVER (
+        ORDER BY month
+    ) AS running_total
+FROM monthly_revenue
+ORDER BY month;
+
+/* ============================================================
+   SECTION 4 — DOCTOR PERFORMANCE (WINDOW FUNCTIONS)
+   ============================================================ */
+   
+-- 4.1 Doctor patient load, ranked (RANK)
+
+WITH doctor_patient_load AS (
+    SELECT
+        d.doctor_id,
+        CONCAT(d.first_name, ' ', d.last_name) AS doctor_name,
+        d.specialization,
+        COUNT(a.patient_id) AS total_patients
+    FROM doctors d
+    JOIN appointments a
+        ON d.doctor_id = a.doctor_id
+    GROUP BY
+        d.doctor_id,
+        d.first_name,
+        d.last_name,
+        d.specialization
+)
+SELECT
+    doctor_id,
+    doctor_name,
+    specialization,
+    total_patients,
+    RANK() OVER (ORDER BY total_patients DESC) AS doctor_rank
+FROM doctor_patient_load
+ORDER BY doctor_rank;
+
+-- 4.2 Doctor revenue generated, ranked
+
+WITH doctor_revenue AS (
+    SELECT
+        d.doctor_id,
+        CONCAT(d.first_name, ' ', d.last_name) AS doctor_name,
+        d.specialization,
+        SUM(b.amount) AS total_revenue
+    FROM doctors d
+    JOIN appointments a
+        ON d.doctor_id = a.doctor_id
+    JOIN treatments t
+        ON a.appointment_id = t.appointment_id
+    JOIN billing b
+        ON t.treatment_id = b.treatment_id
+    GROUP BY
+        d.doctor_id,
+        d.first_name,
+        d.last_name,
+        d.specialization
+)
+SELECT
+    doctor_id,
+    doctor_name,
+    specialization,
+    total_revenue,
+    RANK() OVER (ORDER BY total_revenue DESC) AS revenue_rank
+FROM doctor_revenue
+ORDER BY revenue_rank;
+
+-- 4.3 Top-earning doctor per branch (ROW_NUMBER + PARTITION BY)
+
+WITH doctor_revenue AS (
+    SELECT
+        d.hospital_branch,
+        d.doctor_id,
+        CONCAT(d.first_name, ' ', d.last_name) AS doctor_name,
+        d.specialization,
+        SUM(b.amount) AS total_revenue
+    FROM doctors d
+    JOIN appointments a
+        ON d.doctor_id = a.doctor_id
+    JOIN treatments t
+        ON a.appointment_id = t.appointment_id
+    JOIN billing b
+        ON t.treatment_id = b.treatment_id
+    GROUP BY
+        d.hospital_branch,
+        d.doctor_id,
+        d.first_name,
+        d.last_name,
+        d.specialization
+),
+ranked_doctors AS (
+    SELECT
+        hospital_branch,
+        doctor_id,
+        doctor_name,
+        specialization,
+        total_revenue,
+        ROW_NUMBER() OVER (
+            PARTITION BY hospital_branch
+            ORDER BY total_revenue DESC
+        ) AS rn
+    FROM doctor_revenue
+)
+SELECT
+    hospital_branch,
+    doctor_id,
+    doctor_name,
+    specialization,
+    total_revenue
+FROM ranked_doctors
+WHERE rn = 1
+ORDER BY hospital_branch;
+
+-- 4.4 Above-average-experience doctors and their no-show rate (correlated CTE)
+
+WITH experienced_doctors AS (
+    SELECT
+        doctor_id,
+        first_name,
+        last_name,
+        specialization,
+        years_experience
+    FROM doctors
+    WHERE years_experience > (
+        SELECT AVG(years_experience)
+        FROM doctors
+    )
+)
+SELECT
+    ed.doctor_id,
+    CONCAT(ed.first_name, ' ', ed.last_name) AS doctor_name,
+    ed.specialization,
+    ed.years_experience,
+    COUNT(a.appointment_id) AS total_appointments,
+    SUM(CASE
+            WHEN a.status = 'No-show' THEN 1
+            ELSE 0
+        END) AS no_show_count,
+    ROUND(
+        SUM(CASE
+                WHEN a.status = 'No-show' THEN 1
+                ELSE 0
+            END) * 100.0 / COUNT(a.appointment_id),
+        2
+    ) AS no_show_rate
+FROM experienced_doctors ed
+LEFT JOIN appointments a
+    ON ed.doctor_id = a.doctor_id
+GROUP BY
+    ed.doctor_id,
+    ed.first_name,
+    ed.last_name,
+    ed.specialization,
+    ed.years_experience
+ORDER BY no_show_rate DESC;
+
+/* ============================================================
+   SECTION 5 — BRANCH & PATIENT-VALUE ANALYSIS
+   ============================================================ */
+   
+-- 5.1 Appointment completion rate by branch
+
+SELECT
+    d.hospital_branch,
+    COUNT(a.appointment_id) AS total_appointments,
+    SUM(CASE
+            WHEN a.status = 'Completed' THEN 1
+            ELSE 0
+        END) AS completed_appointments,
+    ROUND(
+        SUM(CASE
+                WHEN a.status = 'Completed' THEN 1
+                ELSE 0
+            END) * 100.0 / COUNT(a.appointment_id),
+        2
+    ) AS completion_rate
+FROM doctors d
+JOIN appointments a
+    ON d.doctor_id = a.doctor_id
+GROUP BY d.hospital_branch
+ORDER BY completion_rate DESC;
+
+-- 5.2 Top 10 patients by total billed revenue (CTE)
+
+WITH patient_revenue AS (
+    SELECT
+        p.patient_id,
+        CONCAT(p.first_name, ' ', p.last_name) AS patient_name,
+        SUM(b.amount) AS total_billed_revenue
+    FROM patients p
+    JOIN billing b
+        ON p.patient_id = b.patient_id
+    GROUP BY
+        p.patient_id,
+        p.first_name,
+        p.last_name
+)
+SELECT
+    patient_id,
+    patient_name,
+    total_billed_revenue
+FROM patient_revenue
+ORDER BY total_billed_revenue DESC
+LIMIT 10;
+
+-- 5.3 Patients carrying at least one unpaid (Pending/Failed) bill
+
+SELECT
+    p.patient_id,
+    CONCAT(p.first_name, ' ', p.last_name) AS patient_name,
+    COUNT(b.bill_id) AS unpaid_bill_count,
+    SUM(b.amount) AS total_unpaid_amount
+FROM patients p
+JOIN billing b
+    ON p.patient_id = b.patient_id
+WHERE b.payment_status IN ('Pending', 'Overdue')
+GROUP BY
+    p.patient_id,
+    p.first_name,
+    p.last_name
+HAVING COUNT(b.bill_id) >= 1
+ORDER BY total_unpaid_amount DESC;
+
+   
+
+
